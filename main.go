@@ -8,12 +8,16 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"sync"
 
 	"mailer/model"
 	"mailer/service"
-
-	"github.com/aws/aws-sdk-go/aws/awserr"
 )
+
+type EmailResult struct {
+	MessageId string
+	Error     error
+}
 
 func main() {
 	ctx := context.Background()
@@ -80,26 +84,37 @@ func main() {
 		})
 	}
 
+	var wg sync.WaitGroup
+	results := make(chan EmailResult, len(messages))
 	for _, messege := range messages {
-		fillInPlaceholder(messege, template)
+		wg.Add(1)
+		go func(msg *model.MailMessege) {
+			defer wg.Done()
+			fillInPlaceholder(msg, template)
 
-		inputEmail := sesRepository.AssembleEmail(messege)
-		result, err := sesRepository.SendEmail(ctx, inputEmail)
+			inputEmail := sesRepository.AssembleEmail(msg)
+			result, err := sesRepository.SendEmail(ctx, inputEmail)
 
-		// Display error messages if they occur.
-		if err != nil {
-			if aerr, ok := err.(awserr.Error); ok {
-				fmt.Println(aerr.Error())
-			} else {
-				// Print the error, cast err to awserr.Error to get the Code and
-				// Message from an error.
-				fmt.Println(err.Error())
+			if err != nil {
+				results <- EmailResult{Error: err}
+				return
 			}
-			return
-		}
 
-		fmt.Println("Email Sent to address: " + messege.Recipient)
-		fmt.Println("MessegeId: " + *result.MessageId)
+			results <- EmailResult{MessageId: *result.MessageId}
+		}(messege)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for result := range results {
+		if result.Error != nil {
+			fmt.Println(result.Error.Error())
+		} else {
+			fmt.Println("Email Sent. MessageId: " + result.MessageId)
+		}
 	}
 
 }
